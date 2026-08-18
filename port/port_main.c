@@ -683,14 +683,38 @@ int main(int argc, char* argv[]) {
      * extraction + audio init. Quit during the loop cleanly shuts down
      * the partial init we did so far.
      * ==================================================================== */
-    {
-        romPath = Port_FindBaseRomPath();
-        fprintf(stderr, "Prelaunch: %s — waiting for user.\n", romPath ? "ROM detected" : "no ROM yet");
+    /* Set once a Port_LoadRom attempt has failed. It forces the prelaunch
+     * menu to appear on the next pass even where we would normally skip
+     * it, so a bad ROM always leaves the picker reachable. */
+    volatile bool romLoadFailed = false;
 
-        /* Announce the prelaunch screen for screen-reader users.
-         * Port_TTS_Init ran a few lines above so the backend is up;
-         * Port_TTS_Speak is a no-op when TTS is disabled in config. */
-        {
+    for (;;) {
+        romPath = Port_FindBaseRomPath();
+        bool done = false;
+
+#ifdef __ANDROID__
+        /* The Android package keeps its ROM in app storage, so once that
+         * file exists there is nothing useful to choose on every launch.
+         * Keep the picker available for a missing-ROM first run — and for
+         * a ROM that turned out not to load, which is the only way back
+         * to the picker on a device with no reachable file manager. */
+        if (romPath && !romLoadFailed) {
+            fprintf(stderr, "Prelaunch: Android ROM detected — skipping menu.\n");
+            done = true;
+        }
+#endif
+
+        if (!done && !romLoadFailed && romPath && getenv("TMC_AUTOPLAY")) {
+            fprintf(stderr, "Prelaunch: TMC_AUTOPLAY set — skipping menu.\n");
+            done = true;
+        }
+
+        if (!done) {
+            fprintf(stderr, "Prelaunch: %s — waiting for user.\n", romPath ? "ROM detected" : "no ROM yet");
+
+            /* Announce the prelaunch screen for screen-reader users.
+             * Port_TTS_Init ran a few lines above so the backend is up;
+             * Port_TTS_Speak is a no-op when TTS is disabled in config. */
             PortTtsOptions opts = { 0 };
             opts.priority = PORT_TTS_PRIO_URGENT;
             opts.rate = opts.pitch = opts.volume = 0.0f / 0.0f;
@@ -707,11 +731,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        bool done = false;
-        if (romPath && getenv("TMC_AUTOPLAY")) {
-            fprintf(stderr, "Prelaunch: TMC_AUTOPLAY set — skipping menu.\n");
-            done = true;
-        }
         /* Deadline pacing keeps the prelaunch menu near 60 Hz without
          * busy-waiting. Fixed SDL_Delay(16) drifts and can spin hot on
          * timer jitter; this yields only until the next frame deadline. */
@@ -813,13 +832,35 @@ int main(int argc, char* argv[]) {
             }
         }
         fprintf(stderr, "Prelaunch: Play — loading ROM and assets.\n");
+
+        /* Play pressed and romPath is set. Select the active mod set before
+         * Port_LoadRom touches the asset loader, so TMC_MODS applies to early
+         * table/text/area overrides too. */
+        Port_Mods_Init();
+
+        /* A ROM that is missing, unreadable, truncated or an unsupported
+         * region used to exit the process from inside the loader. Catch
+         * those here instead and loop back to the prelaunch card, whose
+         * Change-ROM button can install a replacement. Out-of-memory
+         * still exits — see Port_Rom_SetRecoverable. */
+        Port_Rom_SetRecoverable(1);
+        if (setjmp(*Port_Rom_RecoveryPoint()) == 0) {
+            Port_LoadRom(romPath);
+            Port_Rom_SetRecoverable(0);
+            break;
+        }
+        Port_Rom_SetRecoverable(0);
+
+        fprintf(stderr, "Prelaunch: ROM load failed — returning to the picker.\n");
+        {
+            char msg[1280];
+            snprintf(msg, sizeof(msg), "%s\n\nChoose a different ROM file to continue.", Port_Rom_LastErrorMessage());
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, Port_Rom_LastErrorTitle(), msg, window);
+        }
+        Port_Rom_ResetForRetry();
+        romLoadFailed = true;
     }
 
-    /* Play pressed and romPath is set. Select the active mod set before
-     * Port_LoadRom touches the asset loader, so TMC_MODS applies to early
-     * table/text/area overrides too. */
-    Port_Mods_Init();
-    Port_LoadRom(romPath);
 #ifdef TMC_GPU_RENDERER
     Port_EnsureAssetsReadyWithDisplay(NULL, gRomData, gRomSize);
 #else
