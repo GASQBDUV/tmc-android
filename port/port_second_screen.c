@@ -137,6 +137,7 @@ enum {
     SS_ACT_MAPVIEW,
     SS_ACT_MAPZOOM,
     SS_ACT_QUESTVIEW, /* arg: which quest screen to show */
+    SS_ACT_SETTING_SCROLL, /* arg: 0 = page up, 1 = page down */
 };
 
 /* Settings rows, top to bottom. The second-screen-only toggles persist
@@ -257,6 +258,11 @@ static struct {
     /* Quest tab: which of its screens is up — the status screen itself or
      * one of the two lists it opens, the same step in the pause menu. */
     uint8_t questView;
+    /* Settings tab: index into the visible-row list of the row drawn at the
+     * top of the page. The list outgrew the plate, so rows now keep a
+     * readable height and the page scrolls instead of everything shrinking
+     * to fit. */
+    uint8_t settingsTop;
 } sUi = { .floorPreview = SS_NO_FLOOR, .playerFloorDisp = SS_NO_FLOOR };
 
 /* sUi.questView */
@@ -1905,9 +1911,13 @@ static int GetSettingState(int row, char* out, int outCap) {
 /* SETTINGS tab: this panel's map toggles plus the port-wide switches the
  * F8 menu owns on the top screen, as tappable rows — wells on the slab,
  * banner-font labels, the value as a message chip on the right (red chip
- * = active, dark chip = off, the menu's own accent pairing). Rows size
- * themselves to the panel so all SS_SET_COUNT stay on screen and
- * tappable at every supported surface. */
+ * = active, dark chip = off, the menu's own accent pairing).
+ *
+ * Rows keep a readable height and the list pages instead of shrinking to
+ * fit: dividing the plate by SS_SET_COUNT made every row thinner as rows
+ * were added, and at the Thor panel's height the labels had gone too small
+ * to read comfortably. Whatever does not fit is reached with the PREV/NEXT
+ * chips, which only appear when there is somewhere to go. */
 static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float ry0, float rx1, float ry1,
                                float u, int32_t ts) {
     Port_SecondScreenTheme_DrawPlate(s->px, s->w, s->h, s->stride, (int32_t)rx0, (int32_t)ry0,
@@ -1926,16 +1936,48 @@ static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float 
 
     float gap = 8 * u;
     float y0 = iy0 + MENU_TEXT_BOX * hms + 32 * u;
-    float rowH = ((iy1 - 6 * u - y0) - (nRows - 1) * gap) / nRows;
+    float listH = (iy1 - 6 * u) - y0;
+
+    /* Target row height first, then see how many fit — the reverse of the
+     * old "divide by row count". 52u reads well on the Thor panel and on
+     * the wide dev surface; the clamp keeps very short plates usable. */
+    float rowH = 52 * u;
     if (rowH > 64 * u) rowH = 64 * u;
+    if (rowH > listH) rowH = listH;
+
+    int perPage = (int)((listH + gap) / (rowH + gap));
+    if (perPage < 1) perPage = 1;
+    if (perPage > nRows) perPage = nRows;
+
+    /* Reserve the last slot for the pager when the list does not fit, so
+     * the chips never sit on top of a row. */
+    const int paged = perPage < nRows;
+    int visible = perPage;
+    if (paged) {
+        visible = perPage - 1;
+        if (visible < 1) visible = 1;
+    }
+
+    /* Clamped here rather than in the tap handler: this is the pass that
+     * knows how many rows a page actually holds, and it writes the result
+     * back so the handler's next step works from a sane base. Same lock
+     * every other cross-thread sUi field on this path uses. */
+    int top;
+    UI_LOCK();
+    top = sUi.settingsTop;
+    if (top > nRows - visible) top = nRows - visible;
+    if (top < 0) top = 0;
+    sUi.settingsTop = (uint8_t)top;
+    UI_UNLOCK();
+
     int32_t rms = (int32_t)(rowH * 0.55f / MENU_TEXT_BOX);
     int32_t rmsMax = (int32_t)(1.8f * u);
     if (rmsMax < 1) rmsMax = 1;
     if (rms > rmsMax) rms = rmsMax;
     if (rms < 1) rms = 1;
 
-    for (int slot = 0; slot < nRows; slot++) {
-        int i = rows[slot];
+    for (int slot = 0; slot < visible; slot++) {
+        int i = rows[top + slot];
         float ry = y0 + slot * (rowH + gap);
         float rl = ix0 + 10 * u, rr = ix1 - 10 * u;
         char val[16]; /* room for the longest value word, not just "SHOW" */
@@ -1965,6 +2007,40 @@ static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float 
             MenuTextCentered(s, val, (cx0 + cx1) / 2.0f, cy0 + ch / 2.0f, rms, SS_TEXT_WHITE);
         }
         AddTarget(tl, rl, ry, rr, ry + rowH, SS_ACT_SETTING, (uint8_t)i);
+    }
+
+    if (paged) {
+        /* PREV / NEXT share the pager row, each half its width, and each is
+         * drawn dark once it has nowhere left to go — the row keeps its
+         * position either way so the list does not jump as it scrolls. */
+        float ry = y0 + visible * (rowH + gap);
+        float rl = ix0 + 10 * u, rr = ix1 - 10 * u;
+        float mid = (rl + rr) / 2.0f;
+        const int canUp = top > 0;
+        const int canDown = top + visible < nRows;
+        float ch = rowH - 8 * u;
+        int32_t cts = (int32_t)(ch / 24.0f);
+        if (cts < 1) cts = 1;
+
+        struct {
+            float x0, x1;
+            const char* label;
+            int enabled;
+            uint8_t arg;
+        } pager[2] = {
+            { rl, mid - 6 * u, "PREV", canUp, 0 },
+            { mid + 6 * u, rr, "NEXT", canDown, 1 },
+        };
+        for (int k = 0; k < 2; k++) {
+            Port_SecondScreenTheme_DrawChip(s->px, s->w, s->h, s->stride, (int32_t)pager[k].x0, (int32_t)ry,
+                                            (int32_t)(pager[k].x1 - pager[k].x0), (int32_t)ch, cts,
+                                            pager[k].enabled ? SS_CHIP_RED : SS_CHIP_DARK);
+            MenuTextCentered(s, pager[k].label, (pager[k].x0 + pager[k].x1) / 2.0f, ry + ch / 2.0f, rms,
+                             SS_TEXT_WHITE);
+            if (pager[k].enabled) {
+                AddTarget(tl, pager[k].x0, ry, pager[k].x1, ry + ch, SS_ACT_SETTING_SCROLL, pager[k].arg);
+            }
+        }
     }
 }
 
@@ -2504,6 +2580,23 @@ void Port_SecondScreen_OnTap(int x, int y, int longPress) {
             }
             UI_UNLOCK();
             break;
+        case SS_ACT_SETTING_SCROLL: {
+            /* Page by whole screens. The paint pass clamps against the row
+             * count it actually laid out, so stepping by a generous amount
+             * here cannot overshoot into an empty page. */
+            UI_LOCK();
+            int step = 4;
+            int top = (int)sUi.settingsTop + (hit.arg ? step : -step);
+            if (top < 0) {
+                top = 0;
+            }
+            if (top > SS_SET_COUNT - 1) {
+                top = SS_SET_COUNT - 1;
+            }
+            sUi.settingsTop = (uint8_t)top;
+            UI_UNLOCK();
+            break;
+        }
         case SS_ACT_SETTING:
             switch (hit.arg) {
                 case SS_SET_TOP_HUD:
