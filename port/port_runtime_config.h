@@ -49,6 +49,18 @@ void Port_Config_SetShowFps(bool on);
 bool Port_Config_GetTouchControls(void);
 void Port_Config_SetTouchControls(bool on);
 bool Port_Config_PortSettingsMenuEnabled(void);
+
+/* False = Start no longer opens the game's pause menu during play
+ * (issue #14). The F8 port menu and the file-select screens are
+ * unaffected. Default true. */
+/* True = the panel's overworld map hides zoom-grid regions the player has
+ * not walked into yet (issue #13). Session-scoped tracking, so this is
+ * off by default — see the definition in port_runtime_config.cpp. */
+bool Port_Config_GetSecondScreenMapFog(void);
+void Port_Config_SetSecondScreenMapFog(bool enabled);
+
+bool Port_Config_GamePauseMenuEnabled(void);
+void Port_Config_SetGamePauseMenuEnabled(bool enabled);
 void Port_Config_SetWindowScale(u8 scale);
 void Port_Config_SetUpscaleMethod(const char* method);
 void Port_Config_SetTargetFps(u32 fps);
@@ -334,6 +346,14 @@ bool Port_Config_GetLeftStick(float* outX, float* outY);
  * meaningful when REBORN_FEAT_ANALOG_360_MOVEMENT is enabled. Default 0.30. */
 float Port_Config_GetAnalogDeadzone(void);
 void Port_Config_SetAnalogDeadzone(float v);
+
+/* Half-width in degrees of the "walk straight" window around each cardinal
+ * for 360° analog movement, range [0..22.5]. A stick held slightly off
+ * vertical otherwise lands on a neighbouring 11.25° slot and Link drifts
+ * sideways; angles this close to a cardinal snap onto it exactly. 0 keeps
+ * the raw 32-way snap. Default 12. */
+float Port_Config_GetAnalogCardinalSnap(void);
+void Port_Config_SetAnalogCardinalSnap(float v);
 
 /* Clear the per-input "pressed this frame" edge cache. Call after the
  * port has committed KEYINPUT and the engine has read it, so the next

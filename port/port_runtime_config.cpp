@@ -185,6 +185,21 @@ float sPracticeSlowmo = 1.0f;
 /* Runtime toggles that previously lived only in memory (issue #146): they
  * now persist to config.json and are re-applied at startup. */
 bool sDiscordRpc = false;
+/* Start opens the game's own pause menu on the main screen. Turned off,
+ * Start is inert in-game (issue #14): on a dual-screen handheld the panel
+ * already shows the map, quest status and inventory, so covering the game
+ * with the stock menu breaks the two-screen illusion. Does not touch the
+ * F8 port menu, and never blocks the file-select or naming screens. */
+bool sGamePauseMenu = true;
+/* Hide overworld regions the player has not reached yet on the panel map
+ * (issue #13). The map art is one finished picture of Hyrule, so shipped
+ * behaviour hands a new player the whole overworld at once.
+ *
+ * Off by default: it changes how the map reads for everyone, and the
+ * tracking is session-scoped, so a player who loads a long-running save
+ * would find their own Hyrule blanked until they walked it again. Opt in
+ * from the panel's SETTINGS tab. */
+bool sSecondScreenMapFog = false;
 bool sVSyncCfg = true; /* matches Port_PPU's sVSyncEnabled default */
 /* GPU PPU rasterizer (docs/gpu-rasterizer-design.md): default on where the
  * SDL_GPU presentation path is active; the CPU rasterizer is the automatic
@@ -215,6 +230,12 @@ bool sFullscreen = false;
 #endif
 bool sFullscreenHideCursor = true; /* hide the OS cursor while fullscreen */
 float sAnalogDeadzone = 0.30f;     /* 360° stick deadzone magnitude [0..0.95] */
+/* Half-width, in degrees, of the "walk straight" window around each of the
+ * four cardinals. 360° movement snaps to 11.25° steps, so a stick held a
+ * few degrees off vertical still reads as a diagonal and Link drifts. Any
+ * angle within this many degrees of up/down/left/right is pulled onto the
+ * cardinal exactly. 0 disables it and restores raw 32-way snapping. */
+float sAnalogCardinalSnap = 12.0f; /* degrees [0..22.5] */
 std::string sShaderPreset;         /* path to active .glslp, empty = none */
 unsigned sRebornFeatures = 0;      /* bitmask of enabled Reborn features */
 bool sHasRebornFeatures = false;   /* was the key present in config.json? */
@@ -346,6 +367,8 @@ const BoolCfg kBoolCfg[] = {
     { "rando_obscure", &sRandoObscure, false },
     { "rando_kinstones", &sRandoKinstones, true },
     { "rando_entrances", &sRandoEntrances, false },
+    { "game_pause_menu", &sGamePauseMenu, true },
+    { "second_screen_map_fog", &sSecondScreenMapFog, false },
     { "rando_dojos", &sRandoDojos, true },
     { "rando_open_world", &sRandoOpenWorld, false },
     { "rando_homewarp", &sRandoHomewarp, true },
@@ -376,6 +399,7 @@ const FloatCfg kFloatCfg[] = {
     { "lcd_persistence_rho", &sLcdPersistRho, 0.35 },
     { "master_volume", &sMasterVolume, 1.0 },
     { "analog_deadzone", &sAnalogDeadzone, 0.30 },
+    { "analog_cardinal_snap", &sAnalogCardinalSnap, 12.0 },
 };
 const ScaleCfg kScaleCfg[] = {
     { "window_scale", &sScale, 3, 1, 10 },
@@ -2008,6 +2032,34 @@ extern "C" bool Port_Config_GetFullscreenHideCursor(void) {
 extern "C" void Port_Config_SetFullscreenHideCursor(bool on) {
     sFullscreenHideCursor = on;
     sConfigJson["fullscreen_hide_cursor"] = on;
+    SaveConfig();
+}
+extern "C" bool Port_Config_GetSecondScreenMapFog(void) {
+    return sSecondScreenMapFog;
+}
+extern "C" void Port_Config_SetSecondScreenMapFog(bool on) {
+    sSecondScreenMapFog = on;
+    sConfigJson["second_screen_map_fog"] = on;
+    SaveConfig();
+}
+extern "C" bool Port_Config_GamePauseMenuEnabled(void) {
+    return sGamePauseMenu;
+}
+extern "C" void Port_Config_SetGamePauseMenuEnabled(bool on) {
+    sGamePauseMenu = on;
+    sConfigJson["game_pause_menu"] = on;
+    SaveConfig();
+}
+extern "C" float Port_Config_GetAnalogCardinalSnap(void) {
+    return sAnalogCardinalSnap;
+}
+extern "C" void Port_Config_SetAnalogCardinalSnap(float v) {
+    if (v < 0.0f)
+        v = 0.0f;
+    if (v > 22.5f)
+        v = 22.5f;
+    sAnalogCardinalSnap = v;
+    sConfigJson["analog_cardinal_snap"] = (double)v;
     SaveConfig();
 }
 extern "C" float Port_Config_GetAnalogDeadzone(void) {

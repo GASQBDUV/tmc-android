@@ -7,6 +7,7 @@
 #include "player.h"
 #ifdef PC_PORT
 #include "port_debug_verbose.h"
+#include "port_runtime_config.h"
 #endif
 #include "area.h"
 #include "asm.h"
@@ -304,6 +305,15 @@ static Entity* gSleepBubbleEntity = NULL;
 
 bool32 CheckInitPauseMenu(void) {
     u32 framestate;
+#ifdef PC_PORT
+    /* Issue #14: the player can switch the in-game pause menu off entirely
+     * so Start stays inert during play. Checked before every other gate so
+     * the stock blocked-reason logging below stays about the game's own
+     * conditions rather than this preference. */
+    if (!Port_Config_GamePauseMenuEnabled()) {
+        return FALSE;
+    }
+#endif
     if (((gInput.newKeys & START_BUTTON) == 0 || gFadeControl.active || gPauseMenuOptions.disabled ||
          (gMessage.state & MESSAGE_ACTIVE) || gSave.stats.health == 0 || !gSave.inventory[0] ||
          gPlayerState.controlMode != 0 || gPriorityHandler.priority_timer != 0)) {
