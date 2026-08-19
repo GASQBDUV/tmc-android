@@ -61,6 +61,26 @@ bool Port_AnalogMovement_Apply(u32* heldInputOut, u32* directionOut) {
      * subtract 8 (90°) to put 0 at the top of the screen. */
     float angle = atan2f(sx, -sy); /* 0 = up, +π/2 = right */
     if (angle < 0.0f) angle += 2.0f * kPi;
+
+    /* Pull near-cardinal angles onto the cardinal so a stick held a few
+     * degrees off vertical still walks straight (issue #9). Without this
+     * the 11.25° snap below turns a 6° lean into a diagonal, which reads
+     * as drift. Snapping the angle rather than the stick keeps the
+     * remaining 28 intermediate directions exactly as they were. */
+    {
+        float snapDeg = Port_Config_GetAnalogCardinalSnap();
+        if (snapDeg < 0.0f) snapDeg = 0.0f;
+        if (snapDeg > 22.5f) snapDeg = 22.5f;
+        if (snapDeg > 0.0f) {
+            const float quarter = kPi * 0.5f;
+            const float nearest = quarter * floorf(angle / quarter + 0.5f);
+            if (fabsf(angle - nearest) <= snapDeg * (kPi / 180.0f)) {
+                angle = nearest;
+                if (angle < 0.0f) angle += 2.0f * kPi;
+            }
+        }
+    }
+
     const int dir32 = ((int)((angle * 32.0f) / (2.0f * kPi) + 0.5f)) & 31;
 
     /* Also set the cardinal direction bits whose component matches the

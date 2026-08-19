@@ -51,6 +51,7 @@ extern "C" void Port_ApplyLanguage(void);
 #include "port_gpu_renderer.h"
 #include "port_prelaunch_logo.h"
 #include "port_reborn.h"
+#include "port_second_screen.h"
 #include "port_discord_rpc.h" /* Port_DiscordRpc_IsEnabled / SetEnabled */
 #include "port_tts.h"         /* Port_TTS_* — accessibility tab + focus reader */
 #include "port_a11y_cues.h"   /* Port_A11y_ScanSurroundings — navigation cues */
@@ -1235,6 +1236,50 @@ static void DrawRibbonControlsTab(void) {
             ImGui::EndTable();
         }
         ImGui::TextDisabled("Save-states (F1-F6) are disabled in Console-Parity mode.");
+    }
+
+    if (ImGui::CollapsingHeader("In-game menu", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool pause = Port_Config_GamePauseMenuEnabled();
+        if (ImGui::Checkbox("Start opens the pause menu", &pause)) {
+            Port_Config_SetGamePauseMenuEnabled(pause);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(off = Start does nothing during play)");
+        ImGui::TextDisabled("The panel's own map, quest and item tabs keep working either way.");
+    }
+
+    /* Analog stick (issue #9). These lived only on the Reborn tab, so a
+     * player bothered by stick drift had no reason to find them — this is
+     * where anyone looks for stick behaviour. Same settings, one home. */
+    if (ImGui::CollapsingHeader("Analog stick", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool on = Port_Reborn_IsEnabled(REBORN_FEAT_ANALOG_360_MOVEMENT);
+        if (ImGui::Checkbox("360\u00b0 analog movement", &on)) {
+            Port_Reborn_SetEnabled(REBORN_FEAT_ANALOG_360_MOVEMENT, on);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(off = stock 8-direction D-pad feel)");
+
+        if (on) {
+            ImGui::Indent(20.0f);
+
+            float dz = Port_Config_GetAnalogDeadzone();
+            ImGui::SetNextItemWidth(180.0f);
+            if (ImGui::SliderFloat("Deadzone", &dz, 0.0f, 0.95f, "%.2f")) {
+                Port_Config_SetAnalogDeadzone(dz);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(how far to push before Link moves)");
+
+            float snap = Port_Config_GetAnalogCardinalSnap();
+            ImGui::SetNextItemWidth(180.0f);
+            if (ImGui::SliderFloat("Walk-straight window", &snap, 0.0f, 22.5f, "%.1f\u00b0")) {
+                Port_Config_SetAnalogCardinalSnap(snap);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(pull near-straight angles onto up/down/left/right)");
+
+            ImGui::Unindent(20.0f);
+        }
     }
 #ifdef __ANDROID__
     if (ImGui::CollapsingHeader("Touch controls", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -4344,11 +4389,22 @@ extern "C" bool Port_ImGui_Render(void) {
      * the F8 hotkey. It rides the touch-overlay switch: it exists for people
      * with no keyboard, and someone who has turned the on-screen controls
      * off wants the game screen clear of overlay furniture, this corner
-     * included. F8 and the gamepad chord still open the menu, and on a
-     * handheld the second screen's settings tab switches it back on. */
+     * included. F8 and the gamepad chord still open the menu.
+     *
+     * Issue #10: on a dual-screen handheld the panel's SETTINGS tab has a
+     * PORT MENU row, so the corner chip is redundant furniture sitting on
+     * top of the game — the last piece of overlay on the game screen. Drop
+     * it there and leave the desktop trigger alone, where the panel may not
+     * be present to replace it. */
+#ifdef __ANDROID__
+    if (!Port_SecondScreen_HasSurface() && Port_Config_GetTouchControls() && Port_Config_PortSettingsMenuEnabled()) {
+        DrawMenuTrigger();
+    }
+#else
     if (Port_Config_GetTouchControls() && Port_Config_PortSettingsMenuEnabled()) {
         DrawMenuTrigger();
     }
+#endif
 
     /* Quit-save confirm modal — only renders when armed by
      * Port_ImGui_RequestQuitModal (called from port_bios.c when SDL

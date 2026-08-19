@@ -137,6 +137,7 @@ enum {
     SS_ACT_MAPVIEW,
     SS_ACT_MAPZOOM,
     SS_ACT_QUESTVIEW, /* arg: which quest screen to show */
+    SS_ACT_SETTING_SCROLL, /* arg: 0 = page up, 1 = page down */
 };
 
 /* Settings rows, top to bottom. The second-screen-only toggles persist
@@ -157,6 +158,9 @@ enum {
     SS_SET_HOLD_ADVANCE,  /* hold_advance_text (message.c reads per frame) */
     SS_SET_BACKDROP,      /* second_screen_backdrop: cycles SS_BACKDROP_* */
     SS_SET_SWAP_SCREENS,  /* second_screen_swap; applied at the next launch */
+    SS_SET_MAP_FOG,       /* second_screen_map_fog: hide unwalked regions (issue #13) */
+    SS_SET_START_MENU,    /* game_pause_menu: Start opens the stock menu (issue #14) */
+    SS_SET_PORT_MENU,     /* action row: opens the F8 port menu (issue #10) */
     SS_SET_COUNT
 };
 
@@ -170,6 +174,10 @@ extern int Port_QuickSave_AutoEnabled(void);
 extern void Port_QuickSave_SetAutoEnabled(int enabled);
 extern void Port_Config_SetAutosaveEnabled(bool enabled);
 extern void Port_PPU_SetColorCorrection(bool enabled);
+/* The F8 port menu's open/close toggle (port_debug_menu.cpp), declared
+ * here rather than pulling in its header — the PORT MENU row is the only
+ * thing on this panel that touches it (issue #10). */
+extern void Port_DebugMenu_Toggle(void);
 extern bool Port_Config_WidescreenEnabled(void);
 extern void Port_Config_SetWidescreenEnabled(bool enabled);
 extern bool Port_Config_GetSecondScreenSwap(void);
@@ -250,6 +258,11 @@ static struct {
     /* Quest tab: which of its screens is up — the status screen itself or
      * one of the two lists it opens, the same step in the pause menu. */
     uint8_t questView;
+    /* Settings tab: index into the visible-row list of the row drawn at the
+     * top of the page. The list outgrew the plate, so rows now keep a
+     * readable height and the page scrolls instead of everything shrinking
+     * to fit. */
+    uint8_t settingsTop;
 } sUi = { .floorPreview = SS_NO_FLOOR, .playerFloorDisp = SS_NO_FLOOR };
 
 /* sUi.questView */
@@ -939,6 +952,73 @@ static void DrawMapChip(const SSurf* s, const char* label, float cx, float cyBot
     out[3] = y1;
 }
 
+/* Zoom-grid tiles the player has stood in this session (issue #13). The
+ * world map art is one finished picture of all of Hyrule, so without this
+ * the panel hands a first-time player the whole overworld. Keyed by the
+ * same region ids the zoom grid uses, and filled from the player's own
+ * position each frame — the map only ever reveals ground actually walked.
+ *
+ * Session-scoped like sVisitedByArea, the dungeon automap's record: both
+ * are port-side tracking with nothing to store them in on the save file,
+ * and both re-reveal quickly because they follow the player. */
+#define SS_MAX_REGIONS 64
+static uint8_t sVisitedRegions[SS_MAX_REGIONS];
+
+static void MarkRegionVisited(int32_t mapX, int32_t mapY) {
+    int32_t region, r[4];
+    if (!Port_SecondScreenWorldMap_GetRegionAt(mapX, mapY, &region, &r[0], &r[1], &r[2], &r[3])) {
+        return;
+    }
+    if (region >= 0 && region < SS_MAX_REGIONS) {
+        sVisitedRegions[region] = 1;
+    }
+}
+
+static int RegionVisited(int32_t region) {
+    return region >= 0 && region < SS_MAX_REGIONS && sVisitedRegions[region];
+}
+
+/* Paint over every zoom-grid tile the player has not reached yet. Walks the
+ * grid by asking for the tile under a probe point and stepping past its
+ * right/bottom edge, so the layout stays the map screen's own — this file
+ * never hardcodes a grid size. Tiles the grid does not answer for are left
+ * alone: unknown is not the same as undiscovered, and covering them would
+ * blank parts of the map that have no tile at all. */
+static void CoverUndiscoveredRegions(const SSurf* s, float ox, float oy, float scale, float rx0, float ry0,
+                                     float rx1, float ry1) {
+    const uint32_t fog = Port_SecondScreenTheme_Color(SSC_MENU_INK);
+    int32_t probeY = WMAP_CROP_Y0;
+    int guard = 0;
+    while (probeY < WMAP_CROP_Y1 && guard++ < 4096) {
+        int32_t rowBottom = probeY + 1;
+        int32_t probeX = WMAP_CROP_X0;
+        int colGuard = 0;
+        while (probeX < WMAP_CROP_X1 && colGuard++ < 4096) {
+            int32_t region, r[4];
+            if (!Port_SecondScreenWorldMap_GetRegionAt(probeX, probeY, &region, &r[0], &r[1], &r[2], &r[3])) {
+                probeX += 8;
+                continue;
+            }
+            if (r[3] + 1 > rowBottom) {
+                rowBottom = r[3] + 1;
+            }
+            if (!RegionVisited(region)) {
+                float cx0 = ox + (float)r[0] * scale, cy0 = oy + (float)r[1] * scale;
+                float cx1 = ox + (float)r[2] * scale, cy1 = oy + (float)r[3] * scale;
+                if (cx0 < rx0) cx0 = rx0;
+                if (cy0 < ry0) cy0 = ry0;
+                if (cx1 > rx1) cx1 = rx1;
+                if (cy1 > ry1) cy1 = ry1;
+                if (cx1 > cx0 && cy1 > cy0) {
+                    FillRect(s, (int32_t)cx0, (int32_t)cy0, (int32_t)cx1, (int32_t)cy1, fog);
+                }
+            }
+            probeX = r[2] + 1;
+        }
+        probeY = rowBottom;
+    }
+}
+
 /* The interactive overworld map, full-bleed in the map area: a gliding
  * follow-cam centered on Link, tap to toggle the whole-map fitted view,
  * and from the whole view a tap on a map tile brackets it and zooms into
@@ -960,6 +1040,7 @@ static void PaintOverworld(const SSurf* s, const SecondScreenSnapshot* snap, Tar
         sLastFix.valid = 1;
         sLastFix.mapX = mx;
         sLastFix.mapY = my;
+        MarkRegionVisited(mx, my);
     }
 
     /* All view math runs on the stone-frame crop, not the raw composite,
@@ -1013,6 +1094,10 @@ static void PaintOverworld(const SSurf* s, const SecondScreenSnapshot* snap, Tar
     float oy = (ry0 + ry1) / 2.0f - sCam.y * sCam.scale;
     BlitMapRegion(s, img, imgW, imgH, ox, oy, sCam.scale, (int32_t)rx0, (int32_t)ry0, (int32_t)rx1,
                   (int32_t)ry1);
+
+    if (Port_Config_GetSecondScreenMapFog()) {
+        CoverUndiscoveredRegions(s, ox, oy, sCam.scale, rx0, ry0, rx1, ry1);
+    }
 
     /* Map hints — the red checks and errand glyphs the game's own world map
      * shows — right above the map art, below the crest pins and the player
@@ -1703,7 +1788,8 @@ static const char* const kSettingLabels[SS_SET_COUNT] = {
     "TOP HUD",           "WIDESCREEN",       "TOUCH CONTROLS", "FOLLOW CAM",
     "WINDCREST PINS",    "FLOOR AUTO RETURN", "MASTER VOLUME",  "AUTOSAVE",
     "COLOR CORRECTION",  "SHOW FPS",          "HOLD TO ADVANCE TEXT",
-    "PANEL BACKDROP",    "SWAP SCREENS",
+    "PANEL BACKDROP",    "SWAP SCREENS",     "MAP FOG",        "START MENU",
+    "PORT MENU",
 };
 
 /* The widest value word any row can show. Every row's value chip is cut to
@@ -1783,6 +1869,13 @@ static int GetSettingState(int row, char* out, int outCap) {
             return pct > 0;
         }
         case SS_SET_AUTOSAVE: on = Port_QuickSave_AutoEnabled() != 0; break;
+        case SS_SET_MAP_FOG: on = Port_Config_GetSecondScreenMapFog(); break;
+        case SS_SET_START_MENU: on = Port_Config_GamePauseMenuEnabled(); break;
+        case SS_SET_PORT_MENU:
+            /* An action, not a state: the chip names what tapping does and
+             * never wears the red "active" tint. */
+            snprintf(out, (size_t)outCap, "OPEN");
+            return 0;
         case SS_SET_COLOR_CORRECTION: on = Port_Config_GetColorCorrection(); break;
         case SS_SET_SHOW_FPS: on = Port_Config_GetShowFps(); break;
         case SS_SET_HOLD_ADVANCE: on = Port_Config_GetHoldToAdvanceText(); break;
@@ -1818,9 +1911,13 @@ static int GetSettingState(int row, char* out, int outCap) {
 /* SETTINGS tab: this panel's map toggles plus the port-wide switches the
  * F8 menu owns on the top screen, as tappable rows — wells on the slab,
  * banner-font labels, the value as a message chip on the right (red chip
- * = active, dark chip = off, the menu's own accent pairing). Rows size
- * themselves to the panel so all SS_SET_COUNT stay on screen and
- * tappable at every supported surface. */
+ * = active, dark chip = off, the menu's own accent pairing).
+ *
+ * Rows keep a readable height and the list pages instead of shrinking to
+ * fit: dividing the plate by SS_SET_COUNT made every row thinner as rows
+ * were added, and at the Thor panel's height the labels had gone too small
+ * to read comfortably. Whatever does not fit is reached with the PREV/NEXT
+ * chips, which only appear when there is somewhere to go. */
 static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float ry0, float rx1, float ry1,
                                float u, int32_t ts) {
     Port_SecondScreenTheme_DrawPlate(s->px, s->w, s->h, s->stride, (int32_t)rx0, (int32_t)ry0,
@@ -1839,16 +1936,48 @@ static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float 
 
     float gap = 8 * u;
     float y0 = iy0 + MENU_TEXT_BOX * hms + 32 * u;
-    float rowH = ((iy1 - 6 * u - y0) - (nRows - 1) * gap) / nRows;
+    float listH = (iy1 - 6 * u) - y0;
+
+    /* Target row height first, then see how many fit — the reverse of the
+     * old "divide by row count". 52u reads well on the Thor panel and on
+     * the wide dev surface; the clamp keeps very short plates usable. */
+    float rowH = 52 * u;
     if (rowH > 64 * u) rowH = 64 * u;
+    if (rowH > listH) rowH = listH;
+
+    int perPage = (int)((listH + gap) / (rowH + gap));
+    if (perPage < 1) perPage = 1;
+    if (perPage > nRows) perPage = nRows;
+
+    /* Reserve the last slot for the pager when the list does not fit, so
+     * the chips never sit on top of a row. */
+    const int paged = perPage < nRows;
+    int visible = perPage;
+    if (paged) {
+        visible = perPage - 1;
+        if (visible < 1) visible = 1;
+    }
+
+    /* Clamped here rather than in the tap handler: this is the pass that
+     * knows how many rows a page actually holds, and it writes the result
+     * back so the handler's next step works from a sane base. Same lock
+     * every other cross-thread sUi field on this path uses. */
+    int top;
+    UI_LOCK();
+    top = sUi.settingsTop;
+    if (top > nRows - visible) top = nRows - visible;
+    if (top < 0) top = 0;
+    sUi.settingsTop = (uint8_t)top;
+    UI_UNLOCK();
+
     int32_t rms = (int32_t)(rowH * 0.55f / MENU_TEXT_BOX);
     int32_t rmsMax = (int32_t)(1.8f * u);
     if (rmsMax < 1) rmsMax = 1;
     if (rms > rmsMax) rms = rmsMax;
     if (rms < 1) rms = 1;
 
-    for (int slot = 0; slot < nRows; slot++) {
-        int i = rows[slot];
+    for (int slot = 0; slot < visible; slot++) {
+        int i = rows[top + slot];
         float ry = y0 + slot * (rowH + gap);
         float rl = ix0 + 10 * u, rr = ix1 - 10 * u;
         char val[16]; /* room for the longest value word, not just "SHOW" */
@@ -1878,6 +2007,40 @@ static void PaintSettingsPanel(const SSurf* s, TargetList* tl, float rx0, float 
             MenuTextCentered(s, val, (cx0 + cx1) / 2.0f, cy0 + ch / 2.0f, rms, SS_TEXT_WHITE);
         }
         AddTarget(tl, rl, ry, rr, ry + rowH, SS_ACT_SETTING, (uint8_t)i);
+    }
+
+    if (paged) {
+        /* PREV / NEXT share the pager row, each half its width, and each is
+         * drawn dark once it has nowhere left to go — the row keeps its
+         * position either way so the list does not jump as it scrolls. */
+        float ry = y0 + visible * (rowH + gap);
+        float rl = ix0 + 10 * u, rr = ix1 - 10 * u;
+        float mid = (rl + rr) / 2.0f;
+        const int canUp = top > 0;
+        const int canDown = top + visible < nRows;
+        float ch = rowH - 8 * u;
+        int32_t cts = (int32_t)(ch / 24.0f);
+        if (cts < 1) cts = 1;
+
+        struct {
+            float x0, x1;
+            const char* label;
+            int enabled;
+            uint8_t arg;
+        } pager[2] = {
+            { rl, mid - 6 * u, "PREV", canUp, 0 },
+            { mid + 6 * u, rr, "NEXT", canDown, 1 },
+        };
+        for (int k = 0; k < 2; k++) {
+            Port_SecondScreenTheme_DrawChip(s->px, s->w, s->h, s->stride, (int32_t)pager[k].x0, (int32_t)ry,
+                                            (int32_t)(pager[k].x1 - pager[k].x0), (int32_t)ch, cts,
+                                            pager[k].enabled ? SS_CHIP_RED : SS_CHIP_DARK);
+            MenuTextCentered(s, pager[k].label, (pager[k].x0 + pager[k].x1) / 2.0f, ry + ch / 2.0f, rms,
+                             SS_TEXT_WHITE);
+            if (pager[k].enabled) {
+                AddTarget(tl, pager[k].x0, ry, pager[k].x1, ry + ch, SS_ACT_SETTING_SCROLL, pager[k].arg);
+            }
+        }
     }
 }
 
@@ -2417,6 +2580,23 @@ void Port_SecondScreen_OnTap(int x, int y, int longPress) {
             }
             UI_UNLOCK();
             break;
+        case SS_ACT_SETTING_SCROLL: {
+            /* Page by whole screens. The paint pass clamps against the row
+             * count it actually laid out, so stepping by a generous amount
+             * here cannot overshoot into an empty page. */
+            UI_LOCK();
+            int step = 4;
+            int top = (int)sUi.settingsTop + (hit.arg ? step : -step);
+            if (top < 0) {
+                top = 0;
+            }
+            if (top > SS_SET_COUNT - 1) {
+                top = SS_SET_COUNT - 1;
+            }
+            sUi.settingsTop = (uint8_t)top;
+            UI_UNLOCK();
+            break;
+        }
         case SS_ACT_SETTING:
             switch (hit.arg) {
                 case SS_SET_TOP_HUD:
@@ -2437,6 +2617,22 @@ void Port_SecondScreen_OnTap(int x, int y, int longPress) {
                     break;
                 case SS_SET_FOLLOW:
                     Port_Config_SetSecondScreenFollowCam(!Port_Config_GetSecondScreenFollowCam());
+                    break;
+                case SS_SET_MAP_FOG:
+                    /* The map paint reads the flag each frame, so the
+                     * overworld reveals or re-covers on the next one. */
+                    Port_Config_SetSecondScreenMapFog(!Port_Config_GetSecondScreenMapFog());
+                    break;
+                case SS_SET_START_MENU:
+                    /* Engine-side CheckInitPauseMenu reads the flag each
+                     * time Start is pressed, so this lands immediately. */
+                    Port_Config_SetGamePauseMenuEnabled(!Port_Config_GamePauseMenuEnabled());
+                    break;
+                case SS_SET_PORT_MENU:
+                    /* Issue #10: the port menu's only trigger used to be the
+                     * [=] chip pinned over the game. Opening it from here is
+                     * what lets that overlay go away for good. */
+                    Port_DebugMenu_Toggle();
                     break;
                 case SS_SET_CRESTS:
                     Port_Config_SetSecondScreenCrestPins(!Port_Config_GetSecondScreenCrestPins());
@@ -2624,6 +2820,13 @@ void Port_SecondScreen_OnSurfaceLost(void) {
     fprintf(stderr, "[second_screen] surface lost\n");
 }
 
+int Port_SecondScreen_HasSurface(void) {
+    pthread_mutex_lock(&sWindowMutex);
+    const int has = sWindow != NULL;
+    pthread_mutex_unlock(&sWindowMutex);
+    return has;
+}
+
 #else /* !__ANDROID__ — no second display; surface entry points are no-ops
        * (the compositor + tap handler above still compile and run, which
        * is what the host harness drives). */
@@ -2635,5 +2838,8 @@ void Port_SecondScreen_OnSurfaceReady(void* window, int width, int height) {
     (void)height;
 }
 void Port_SecondScreen_OnSurfaceLost(void) {}
+int Port_SecondScreen_HasSurface(void) {
+    return 0;
+}
 
 #endif

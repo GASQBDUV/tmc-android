@@ -22,7 +22,24 @@ struct Bind {
      * not buttons, so the bind table allows binding to an axis. A value
      * past kAxisThreshold counts as "pressed". */
     SDL_GamepadAxis axis = SDL_GAMEPAD_AXIS_INVALID;
+    /* Which way the axis has to travel to count as pressed: +1 for the
+     * positive half, -1 for the negative half.
+     *
+     * Sticks are bipolar — LEFTX reads negative pushed left and positive
+     * pushed right — so an axis alone does not identify an input. Without
+     * this the whole bind path tested `value > threshold` and only ever
+     * saw the positive half, which is why binding a stick in the Controls
+     * tab could capture Right and Down but never Left or Up.
+     *
+     * Triggers are unipolar positive, so +1 is the default and every
+     * previously-saved `SDL_AXIS:` binding keeps its exact behaviour. */
+    Sint8 axisDir = 1;
 };
+
+/* True when `value` is past the threshold on the half `dir` selects. */
+constexpr bool AxisPastThreshold(int value, Sint8 dir, Sint16 threshold) {
+    return dir < 0 ? (value < -(int)threshold) : (value > (int)threshold);
+}
 
 constexpr Sint16 kAxisThreshold = 16384;
 
@@ -168,6 +185,21 @@ float sPracticeSlowmo = 1.0f;
 /* Runtime toggles that previously lived only in memory (issue #146): they
  * now persist to config.json and are re-applied at startup. */
 bool sDiscordRpc = false;
+/* Start opens the game's own pause menu on the main screen. Turned off,
+ * Start is inert in-game (issue #14): on a dual-screen handheld the panel
+ * already shows the map, quest status and inventory, so covering the game
+ * with the stock menu breaks the two-screen illusion. Does not touch the
+ * F8 port menu, and never blocks the file-select or naming screens. */
+bool sGamePauseMenu = true;
+/* Hide overworld regions the player has not reached yet on the panel map
+ * (issue #13). The map art is one finished picture of Hyrule, so shipped
+ * behaviour hands a new player the whole overworld at once.
+ *
+ * Off by default: it changes how the map reads for everyone, and the
+ * tracking is session-scoped, so a player who loads a long-running save
+ * would find their own Hyrule blanked until they walked it again. Opt in
+ * from the panel's SETTINGS tab. */
+bool sSecondScreenMapFog = false;
 bool sVSyncCfg = true; /* matches Port_PPU's sVSyncEnabled default */
 /* GPU PPU rasterizer (docs/gpu-rasterizer-design.md): default on where the
  * SDL_GPU presentation path is active; the CPU rasterizer is the automatic
@@ -198,6 +230,12 @@ bool sFullscreen = false;
 #endif
 bool sFullscreenHideCursor = true; /* hide the OS cursor while fullscreen */
 float sAnalogDeadzone = 0.30f;     /* 360° stick deadzone magnitude [0..0.95] */
+/* Half-width, in degrees, of the "walk straight" window around each of the
+ * four cardinals. 360° movement snaps to 11.25° steps, so a stick held a
+ * few degrees off vertical still reads as a diagonal and Link drifts. Any
+ * angle within this many degrees of up/down/left/right is pulled onto the
+ * cardinal exactly. 0 disables it and restores raw 32-way snapping. */
+float sAnalogCardinalSnap = 12.0f; /* degrees [0..22.5] */
 std::string sShaderPreset;         /* path to active .glslp, empty = none */
 unsigned sRebornFeatures = 0;      /* bitmask of enabled Reborn features */
 bool sHasRebornFeatures = false;   /* was the key present in config.json? */
@@ -329,6 +367,8 @@ const BoolCfg kBoolCfg[] = {
     { "rando_obscure", &sRandoObscure, false },
     { "rando_kinstones", &sRandoKinstones, true },
     { "rando_entrances", &sRandoEntrances, false },
+    { "game_pause_menu", &sGamePauseMenu, true },
+    { "second_screen_map_fog", &sSecondScreenMapFog, false },
     { "rando_dojos", &sRandoDojos, true },
     { "rando_open_world", &sRandoOpenWorld, false },
     { "rando_homewarp", &sRandoHomewarp, true },
@@ -359,6 +399,7 @@ const FloatCfg kFloatCfg[] = {
     { "lcd_persistence_rho", &sLcdPersistRho, 0.35 },
     { "master_volume", &sMasterVolume, 1.0 },
     { "analog_deadzone", &sAnalogDeadzone, 0.30 },
+    { "analog_cardinal_snap", &sAnalogCardinalSnap, 12.0 },
 };
 const ScaleCfg kScaleCfg[] = {
     { "window_scale", &sScale, 3, 1, 10 },
@@ -413,6 +454,10 @@ void AddBind(PortInput input, const std::string& name) {
     } else if (name.rfind("SDL_GAMEPAD:", 0) == 0) {
         b.pad = static_cast<SDL_GamepadButton>(std::strtoul(name.c_str() + 12, nullptr, 0));
         sBinds[input].push_back(b);
+    } else if (name.rfind("SDL_AXIS-:", 0) == 0) {
+        b.axis = static_cast<SDL_GamepadAxis>(std::strtoul(name.c_str() + 10, nullptr, 0));
+        b.axisDir = -1;
+        sBinds[input].push_back(b);
     } else if (name.rfind("SDL_AXIS:", 0) == 0) {
         b.axis = static_cast<SDL_GamepadAxis>(std::strtoul(name.c_str() + 9, nullptr, 0));
         sBinds[input].push_back(b);
@@ -450,6 +495,32 @@ u64 FrameTimeForFps(u32 fps) {
 /* Serialize a Bind to the config.json token shape (`SDLK:0x...`,
  * `SDL_GAMEPAD:0x...`, `SDL_AXIS:0x...`). Shared by the capture/persist
  * path and (under launcher) the rebind writers. */
+/* Human-readable name for an axis binding. Sticks get the direction the
+ * player actually pushed ("Left Stick Left") rather than the raw SDL axis
+ * ("leftx"), which on its own names two opposite inputs. Triggers and any
+ * unknown axis fall back to the SDL name plus a +/- marker. */
+void FormatAxisName(SDL_GamepadAxis axis, Sint8 dir, char* out, size_t cap) {
+    const bool neg = dir < 0;
+    const char* stick = nullptr;
+    switch (axis) {
+        case SDL_GAMEPAD_AXIS_LEFTX:  stick = neg ? "Left Stick Left" : "Left Stick Right"; break;
+        case SDL_GAMEPAD_AXIS_LEFTY:  stick = neg ? "Left Stick Up" : "Left Stick Down"; break;
+        case SDL_GAMEPAD_AXIS_RIGHTX: stick = neg ? "Right Stick Left" : "Right Stick Right"; break;
+        case SDL_GAMEPAD_AXIS_RIGHTY: stick = neg ? "Right Stick Up" : "Right Stick Down"; break;
+        default: break;
+    }
+    if (stick) {
+        std::snprintf(out, cap, "%s", stick);
+        return;
+    }
+    const char* nm = SDL_GetGamepadStringForAxis(axis);
+    if (nm && nm[0] != '\0') {
+        std::snprintf(out, cap, "%s%s", nm, neg ? " -" : "");
+    } else {
+        std::snprintf(out, cap, "axis %u%s", static_cast<unsigned>(axis), neg ? " -" : "");
+    }
+}
+
 std::string FormatBindForJson(const Bind& b) {
     char buf[40];
     if (b.key != SDLK_UNKNOWN) {
@@ -457,7 +528,8 @@ std::string FormatBindForJson(const Bind& b) {
     } else if (b.pad != SDL_GAMEPAD_BUTTON_INVALID) {
         std::snprintf(buf, sizeof(buf), "SDL_GAMEPAD:0x%08x", (unsigned)b.pad);
     } else if (b.axis != SDL_GAMEPAD_AXIS_INVALID) {
-        std::snprintf(buf, sizeof(buf), "SDL_AXIS:0x%08x", (unsigned)b.axis);
+        std::snprintf(buf, sizeof(buf), b.axisDir < 0 ? "SDL_AXIS-:0x%08x" : "SDL_AXIS:0x%08x",
+                      (unsigned)b.axis);
     } else {
         return std::string();
     }
@@ -531,12 +603,7 @@ static void FormatBindingsLineImpl(PortInput input, char* out, size_t outCap, bo
                 std::snprintf(piece, sizeof(piece), "pad btn %u", static_cast<unsigned>(b.pad));
             }
         } else if (b.axis != SDL_GAMEPAD_AXIS_INVALID) {
-            const char* nm = SDL_GetGamepadStringForAxis(b.axis);
-            if (nm && nm[0] != '\0') {
-                std::snprintf(piece, sizeof(piece), "%s", nm);
-            } else {
-                std::snprintf(piece, sizeof(piece), "axis %u", static_cast<unsigned>(b.axis));
-            }
+            FormatAxisName(b.axis, b.axisDir, piece, sizeof(piece));
         }
         if (piece[0] == '\0') {
             continue;
@@ -1300,8 +1367,10 @@ extern "C" void Port_Config_HandleEvent(const SDL_Event* e) {
         } else if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
             newBind.pad = (SDL_GamepadButton)e->gbutton.button;
             captured = true;
-        } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e->gaxis.value > kAxisThreshold) {
+        } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+                   (e->gaxis.value > kAxisThreshold || e->gaxis.value < -kAxisThreshold)) {
             newBind.axis = (SDL_GamepadAxis)e->gaxis.axis;
+            newBind.axisDir = e->gaxis.value < 0 ? -1 : 1;
             captured = true;
         }
         if (captured) {
@@ -1318,7 +1387,8 @@ extern "C" void Port_Config_HandleEvent(const SDL_Event* e) {
                         const Bind& b = v[k];
                         const bool same = (newBind.key != SDLK_UNKNOWN && b.key == newBind.key) ||
                                           (newBind.pad != SDL_GAMEPAD_BUTTON_INVALID && b.pad == newBind.pad) ||
-                                          (newBind.axis != SDL_GAMEPAD_AXIS_INVALID && b.axis == newBind.axis);
+                                          (newBind.axis != SDL_GAMEPAD_AXIS_INVALID && b.axis == newBind.axis &&
+                                           b.axisDir == newBind.axisDir);
                         if (same) {
                             v.erase(v.begin() + (long)k);
                             changed = true;
@@ -1367,11 +1437,13 @@ extern "C" void Port_Config_HandleEvent(const SDL_Event* e) {
                 }
             }
         }
-    } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e->gaxis.value > kAxisThreshold) {
+    } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+               (e->gaxis.value > kAxisThreshold || e->gaxis.value < -kAxisThreshold)) {
         Port_TouchControls_NotifyGamepadUsed();
         for (size_t i = 0; i < PORT_INPUT_COUNT; i++) {
             for (const Bind& b : sBinds[i]) {
-                if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT && b.axis == (SDL_GamepadAxis)e->gaxis.axis) {
+                if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT && b.axis == (SDL_GamepadAxis)e->gaxis.axis &&
+                    AxisPastThreshold(e->gaxis.value, b.axisDir, kAxisThreshold)) {
                     sEdgePressed[i] = true;
                     break;
                 }
@@ -1442,9 +1514,11 @@ extern "C" bool Port_Config_EventIsInputDown(const SDL_Event* e, PortInput input
                 return true;
             }
         }
-    } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e->gaxis.value > kAxisThreshold) {
+    } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+               (e->gaxis.value > kAxisThreshold || e->gaxis.value < -kAxisThreshold)) {
         for (const Bind& b : sBinds[input]) {
-            if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT && b.axis == (SDL_GamepadAxis)e->gaxis.axis) {
+            if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT && b.axis == (SDL_GamepadAxis)e->gaxis.axis &&
+                AxisPastThreshold(e->gaxis.value, b.axisDir, kAxisThreshold)) {
                 return true;
             }
         }
@@ -1487,7 +1561,8 @@ extern "C" bool Port_Config_InputPressed(PortInput input) {
                 Port_TouchControls_NotifyGamepadUsed();
                 return true;
             }
-            if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT && SDL_GetGamepadAxis(pad, b.axis) > kAxisThreshold) {
+            if (b.axis >= 0 && b.axis < SDL_GAMEPAD_AXIS_COUNT &&
+                AxisPastThreshold(SDL_GetGamepadAxis(pad, b.axis), b.axisDir, kAxisThreshold)) {
                 Port_TouchControls_NotifyGamepadUsed();
                 return true;
             }
@@ -1581,11 +1656,9 @@ extern "C" void Port_Config_BindingLabel(PortInput input, int idx, char* out, in
         else
             std::snprintf(out, cap, "Pad button %d", (int)b.pad);
     } else if (b.axis != SDL_GAMEPAD_AXIS_INVALID) {
-        const char* name = SDL_GetGamepadStringForAxis(b.axis);
-        if (name && *name)
-            std::snprintf(out, cap, "Axis: %s", name);
-        else
-            std::snprintf(out, cap, "Pad axis %d", (int)b.axis);
+        char nm[48];
+        FormatAxisName(b.axis, b.axisDir, nm, sizeof(nm));
+        std::snprintf(out, cap, "Pad: %s", nm);
     }
 }
 
@@ -1959,6 +2032,34 @@ extern "C" bool Port_Config_GetFullscreenHideCursor(void) {
 extern "C" void Port_Config_SetFullscreenHideCursor(bool on) {
     sFullscreenHideCursor = on;
     sConfigJson["fullscreen_hide_cursor"] = on;
+    SaveConfig();
+}
+extern "C" bool Port_Config_GetSecondScreenMapFog(void) {
+    return sSecondScreenMapFog;
+}
+extern "C" void Port_Config_SetSecondScreenMapFog(bool on) {
+    sSecondScreenMapFog = on;
+    sConfigJson["second_screen_map_fog"] = on;
+    SaveConfig();
+}
+extern "C" bool Port_Config_GamePauseMenuEnabled(void) {
+    return sGamePauseMenu;
+}
+extern "C" void Port_Config_SetGamePauseMenuEnabled(bool on) {
+    sGamePauseMenu = on;
+    sConfigJson["game_pause_menu"] = on;
+    SaveConfig();
+}
+extern "C" float Port_Config_GetAnalogCardinalSnap(void) {
+    return sAnalogCardinalSnap;
+}
+extern "C" void Port_Config_SetAnalogCardinalSnap(float v) {
+    if (v < 0.0f)
+        v = 0.0f;
+    if (v > 22.5f)
+        v = 22.5f;
+    sAnalogCardinalSnap = v;
+    sConfigJson["analog_cardinal_snap"] = (double)v;
     SaveConfig();
 }
 extern "C" float Port_Config_GetAnalogDeadzone(void) {

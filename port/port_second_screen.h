@@ -54,6 +54,12 @@ void Port_SecondScreen_OnSurfaceReady(void* window, int width, int height);
  * currently held. */
 void Port_SecondScreen_OnSurfaceLost(void);
 
+/* Nonzero while a second-display surface is attached, i.e. the panel is
+ * actually on screen. Used to decide whether the game screen still needs
+ * the corner port-menu chip (issue #10) — with the panel up, its SETTINGS
+ * tab owns that job. Always 0 off Android. */
+int Port_SecondScreen_HasSurface(void);
+
 /* Called from JNI on a completed tap on the second screen, in surface
  * pixel coordinates (the Java side resolves tap vs long press and calls
  * this once per gesture). Hit-testing happens against the layout of the
