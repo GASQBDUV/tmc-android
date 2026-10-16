@@ -1,0 +1,70 @@
+name: RG DS APK
+
+# Android-only build for the RG DS fork: same recipe as the build-android job
+# in _build.yaml, signed with a fixed throwaway key (android/rgds.keystore) so
+# builds install over each other, and published as a GitHub release.
+
+on:
+  push:
+    branches: [rgds]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout public submodules
+        run: |
+          git submodule sync --recursive || true
+          git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | \
+            awk '{print $2}' | while read -r p; do
+              git submodule update --init --recursive --depth 1 -- "$p" || \
+                echo "::warning::failed to fetch submodule $p, continuing"
+            done
+          test -d libs/VirtuaAPU/src
+
+      - uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
+        with:
+          xmake-version: v3.0.8
+          actions-cache-folder: '.xmake-cache'
+          actions-cache-key: android-apk
+          package-cache: true
+          package-cache-key: android-apk
+          project-path: '.'
+
+      - name: Install pinned Android NDK
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;26.3.11579264"
+          echo "TMC_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Build libmain.so (arm64-v8a + x86_64)
+        run: |
+          for abi in arm64-v8a x86_64; do
+            xmake f -y -p android -a "$abi" --ndk="$TMC_NDK" \
+              --game_version=USA --widescreen_width=384
+            xmake build -y tmc_pc
+            test -f "build/android/$abi/libmain.so"
+          done
+
+      - name: Build release APK
+        run: |
+          export TMC_KEYSTORE_FILE="$GITHUB_WORKSPACE/android/rgds.keystore"
+          export TMC_KEYSTORE_PASSWORD=android
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          cd android
+          ./gradlew --no-daemon :app:assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/tmc-rgds.apk"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rgds-build-${{ github.run_number }}
+          name: RG DS build ${{ github.run_number }}
+          files: tmc-rgds.apk

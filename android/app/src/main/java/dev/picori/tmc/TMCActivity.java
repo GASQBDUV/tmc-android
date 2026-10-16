@@ -27,6 +27,11 @@ public class TMCActivity extends SDLActivity {
 
     private SecondScreenManager mSecondScreen;
 
+    /** The running game activity, for SecondScreenActivity's controller forwarding. */
+    static TMCActivity current() {
+        return mSingleton instanceof TMCActivity ? (TMCActivity) mSingleton : null;
+    }
+
     @Override
     protected String[] getLibraries() {
         return new String[] { "main" };
