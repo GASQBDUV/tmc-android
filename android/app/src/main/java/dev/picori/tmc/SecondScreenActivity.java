@@ -4,7 +4,12 @@ import android.app.Activity;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.WindowManager;
+
+import org.libsdl.app.SDLControllerManager;
 
 /**
  * Hosts the panel ({@link SecondScreenView}) on the device's MAIN display
@@ -32,9 +37,8 @@ public class SecondScreenActivity extends Activity {
             // the default display, and a default display left with no
             // focusable window makes anything routed there ANR with "no
             // focused window" (a zelda3-android finding on this hardware).
-            // The game runs on a separate display with its own per-display
-            // focus, so touching this screen does not take the gamepad away
-            // from it.
+            // The gamepad focus it takes is handed back to the game in
+            // dispatchKeyEvent below.
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             getWindow().getDecorView().setBackgroundColor(Color.BLACK);
             // Same per-window immersive flags the Presentation sets: system
@@ -58,6 +62,47 @@ public class SecondScreenActivity extends Activity {
         sInstance = this;
         Log.i(TAG, "panel activity up on display "
                 + getWindowManager().getDefaultDisplay().getDisplayId());
+    }
+
+    // Gamepad input that lands here belongs to the game. A controller isn't
+    // tied to a display: Android sends its keys to whichever display is
+    // focused, and this activity, started after the game, takes that focus.
+    // On the Thor a tap on the game screen gave it back; on the Anbernic
+    // RG DS / RG DS Plus the game panel has no touch, so the game went deaf.
+    // Making this window non-focusable ANRs instead (see onCreate), so hand
+    // the events to the game's own dispatch: its window keeps its internal
+    // view focus, so SDL picks them up as usual. Same approach as Dusklight's
+    // DuskCompanionActivity.
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (isFromController(event.getDevice())) {
+            Activity game = TMCActivity.current();
+            if (game != null && game.dispatchKeyEvent(event)) {
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    // Sticks and triggers, same reasoning.
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (SDLControllerManager.isDeviceSDLJoystick(event.getDeviceId())
+                && SDLControllerManager.handleJoystickMotionEvent(event)) {
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    // Only real controllers: back/volume from elsewhere keep their usual meaning.
+    private static boolean isFromController(InputDevice device) {
+        if (device == null) {
+            return false;
+        }
+        int sources = device.getSources();
+        return (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                || (sources & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
     }
 
     @Override
