@@ -37,6 +37,12 @@ in this repository.
 Built for the Thor, but it is a plain Android `Presentation` — any device with
 a second display will do.
 
+## bananaOS / Anbernic RG DS
+
+There is also a native aarch64 Linux build for the Anbernic RG DS running bananaOS: the game on the top panel,
+the same second screen on the bottom panel. See [docs/BANANAOS.md](docs/BANANAOS.md) and the
+`bananaos-tmc-*` releases.
+
 ## ROM regions
 
 The native port detects the region from the ROM header and switches its data
