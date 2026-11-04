@@ -1,3 +1,7 @@
+#ifdef TMC_BANANA_PANEL
+#include <unistd.h>
+#include <stdio.h>
+#endif
 #include "gba/io_reg.h"
 #include "save.h" /* gSave for Discord-RPC stat reads */
 #include "main.h"
@@ -457,6 +461,12 @@ static void Port_PumpEvents(void) {
                 if (e.gbutton.button == SDL_GAMEPAD_BUTTON_START)
                     s_start_held = is_down;
                 if (is_down && s_select_held && s_start_held) {
+#ifdef TMC_BANANA_PANEL
+                    /* BananaOS: no window to close; Select+Start exits. */
+                    fprintf(stderr, "[banana] Select+Start pressed, exiting.\n");
+                    fflush(stderr);
+                    _exit(0);
+#endif
                     extern void Port_DebugMenu_Toggle(void);
                     Port_DebugMenu_Toggle();
                     s_select_held = false;

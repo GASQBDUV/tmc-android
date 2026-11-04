@@ -268,7 +268,7 @@ static struct {
 /* sUi.questView */
 enum { SS_QUEST_MAIN = 0, SS_QUEST_KINSTONES, SS_QUEST_TECHNIQUES };
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(TMC_BANANA_PANEL)
 #include <pthread.h>
 static pthread_mutex_t sTapTargetMutex = PTHREAD_MUTEX_INITIALIZER;
 #define UI_LOCK() pthread_mutex_lock(&sTapTargetMutex)
@@ -2826,6 +2826,10 @@ int Port_SecondScreen_HasSurface(void) {
     pthread_mutex_unlock(&sWindowMutex);
     return has;
 }
+
+#elif defined(TMC_BANANA_PANEL) && defined(__linux__)
+
+#include "port_banana_panel.inc"
 
 #else /* !__ANDROID__ — no second display; surface entry points are no-ops
        * (the compositor + tap handler above still compile and run, which

@@ -34,6 +34,12 @@ option("multi_region")
     set_description("Build one PC binary supporting USA/EU/JP at runtime (default; =n for per-region)")
 option_end()
 
+option("banana_panel")
+    set_default(false)
+    set_showmenu(true)
+    set_description("bananaOS / Anbernic RG DS: draw the second-screen panel on the bottom display (DRM, BANANA_PANEL=1)")
+option_end()
+
 option("pc_avx2")
     set_default(true)
     set_showmenu(true)
@@ -183,7 +189,12 @@ else
     -- JNI signatures (3.4.12 added a scancode arg to onNativePadDown; the
     -- 3.4.4-era glue shipped in v0.8.1 crashed every Android launch with
     -- NoSuchMethodError at registration). Bump BOTH together.
-    add_requires("libsdl3 3.4.12", {configs = {shared = false}})
+    if has_config("banana_panel") then
+        -- bananaOS has no X11/Wayland: SDL3 only needs its KMSDRM + evdev backends (libdrm/gbm/EGL from the sysroot)
+        add_requires("libsdl3 3.4.12", {configs = {shared = false, x11 = false, wayland = false}})
+    else
+        add_requires("libsdl3 3.4.12", {configs = {shared = false}})
+    end
 end
 add_requires("guilite")
 
@@ -231,6 +242,10 @@ end
 -- — port_imgui_menu.cpp picks via TMC_GPU_RENDERER define — but the
 -- compiled package needs both files available.
 add_requires("imgui v1.92.7", {configs = {sdl3 = true, sdl3_renderer = true, sdl3_gpu = true}})
+if has_config("banana_panel") then
+    -- imgui pulls its own libsdl3: make it the same KMSDRM-only static build as the one above
+    add_requireconfs("imgui.libsdl3", {override = true, configs = {shared = false, x11 = false, wayland = false}})
+end
 
 -- #15: even with `header_only = true` requested above, the xmake fmt
 -- package still links the system libfmt.so when one happens to be
@@ -871,6 +886,12 @@ target("tmc_pc")
         -- JNI bridge only — references <jni.h>/<android/native_window_jni.h>,
         -- doesn't compile on other platforms.
         add_files("port/port_second_screen_jni.cpp")
+    end
+    if is_plat("linux") and has_config("banana_panel") then
+        -- bananaOS / Anbernic RG DS: bottom panel via DRM (port/port_banana_panel.inc, included by port_second_screen.c)
+        add_defines("TMC_BANANA_PANEL")
+        add_includedirs("/usr/include/libdrm")
+        add_syslinks("png", "z", "GLESv2", "EGL", "drm", "asound", "pthread")
     end
     add_files("port/port_roll_attack_macro.c") -- One-button roll attack (default: D)
     add_files("port/port_touch_controls.cpp")

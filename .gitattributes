@@ -26,3 +26,4 @@ android/gradlew text eol=lf
 *.inc linguist-language=Assembly
 data/** linguist-language=data
 tools/** linguist-vendored
+bananaos/*.sh text eol=lf
