@@ -1,6 +1,7 @@
 # bananaOS / Anbernic RG DS
 
 ![Two panels: game on top, map and inventory on the bottom](img/bananaos-showcase.png)
+![The map zoomed to a region](img/bananaos-showcase-2.png)
 
 Project Picori runs natively on the Anbernic RG DS under **bananaOS** (aarch64 Linux, two 1024x768 panels).
 The game is on the top panel (DSI-2) and the second screen of this fork (map, dungeon map, quest, items,
