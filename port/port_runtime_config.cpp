@@ -5,6 +5,9 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#ifdef TMC_BANANA_PANEL
+#include <unistd.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -1540,6 +1543,32 @@ extern "C" bool Port_Config_InputPressed(PortInput input) {
     }
 
     SDL_UpdateGamepads();
+#ifdef TMC_BANANA_PANEL
+    /* BananaOS has no window manager and no menu to close the game from:
+     * hold START + SELECT (BACK) for one second to exit. */
+    {
+        static uint32_t sComboSince = 0;
+        bool combo = false;
+        for (SDL_Gamepad* pad : sPads) {
+            if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START) &&
+                SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK)) {
+                combo = true;
+            }
+        }
+        if (!combo) {
+            sComboSince = 0;
+        } else {
+            uint32_t t = SDL_GetTicks();
+            if (sComboSince == 0) {
+                sComboSince = t ? t : 1;
+            } else if (t - sComboSince >= 1000) {
+                fprintf(stderr, "[banana] START+SELECT held, exiting.\n");
+                fflush(stderr);
+                _exit(0);
+            }
+        }
+    }
+#endif
     /* Re-scan every ~1s so a hot-plugged pad starts working even if its
      * GAMEPAD_ADDED event somehow didn't reach the poll loop. */
     static uint32_t sNextRescanAt = 0;

@@ -35,6 +35,7 @@ extern Frame* gSpriteAnimations_322[];
 #undef max
 #endif
 
+#include <algorithm>
 #include <nlohmann/json.hpp>
 
 #include <array>
@@ -1817,24 +1818,60 @@ extern "C" bool32 Port_IsRoomHeaderPtrReadable(const void* ptr) {
     return FALSE;
 }
 
+/* Address index over the cached binary blobs: sorted by start pointer, rebuilt only when the cache grows (it is
+ * append-only). The old per-call walk over every blob was the hot spot of area loads (O(blobs) per decompress). */
+struct BlobSpan {
+    const u8* begin;
+    const u8* end;
+};
+static std::vector<BlobSpan> sBlobIndex;
+static size_t sBlobIndexCount = static_cast<size_t>(-1);
+
+static const BlobSpan* FindBlobSpan(const u8* at, bool inclusiveEnd) {
+    if (sBlobIndexCount != gAssetGroupCache.binaryFiles.size()) {
+        sBlobIndex.clear();
+        sBlobIndex.reserve(gAssetGroupCache.binaryFiles.size());
+        for (const auto& [_, dataPtr] : gAssetGroupCache.binaryFiles) {
+            if (dataPtr == nullptr || dataPtr->empty()) {
+                continue;
+            }
+            const u8* begin = dataPtr->data();
+            sBlobIndex.push_back({ begin, begin + dataPtr->size() });
+        }
+        std::sort(sBlobIndex.begin(), sBlobIndex.end(),
+                  [](const BlobSpan& a, const BlobSpan& b) { return a.begin < b.begin; });
+        sBlobIndexCount = gAssetGroupCache.binaryFiles.size();
+    }
+    /* last span whose begin <= at */
+    size_t lo = 0, hi = sBlobIndex.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (sBlobIndex[mid].begin <= at) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    /* Blobs are disjoint allocations, but an at==end hit may belong to the previous span while a later span
+     * starts right there; check the candidate and its predecessor. */
+    for (size_t k = lo; k > 0 && k + 2 > lo; --k) {
+        const BlobSpan& sp = sBlobIndex[k - 1];
+        if (at >= sp.begin && (inclusiveEnd ? at <= sp.end : at < sp.end)) {
+            return &sp;
+        }
+    }
+    return nullptr;
+}
+
 extern "C" bool32 Port_IsLoadedAssetBytes(const void* ptr, u32 size) {
     if (ptr == nullptr) {
         return FALSE;
     }
-
-    for (const auto& [_, dataPtr] : gAssetGroupCache.binaryFiles) {
-        if (dataPtr == nullptr || dataPtr->empty()) {
-            continue;
-        }
-
-        const u8* begin = dataPtr->data();
-        const u8* end = begin + dataPtr->size();
-        const u8* at = static_cast<const u8*>(ptr);
-        if (at >= begin && at <= end && size <= static_cast<u32>(end - at)) {
-            return TRUE;
-        }
+    const u8* at = static_cast<const u8*>(ptr);
+    const BlobSpan* sp = FindBlobSpan(at, true);
+    if (sp != nullptr && size <= static_cast<u32>(sp->end - at)) {
+        return TRUE;
     }
-
     return FALSE;
 }
 
@@ -1849,18 +1886,8 @@ extern "C" const u8* Port_LoadedAssetBytesEnd(const void* ptr) {
     if (ptr == nullptr) {
         return nullptr;
     }
-    const u8* at = static_cast<const u8*>(ptr);
-    for (const auto& [_, dataPtr] : gAssetGroupCache.binaryFiles) {
-        if (dataPtr == nullptr || dataPtr->empty()) {
-            continue;
-        }
-        const u8* begin = dataPtr->data();
-        const u8* end = begin + dataPtr->size();
-        if (at >= begin && at < end) {
-            return end;
-        }
-    }
-    return nullptr;
+    const BlobSpan* sp = FindBlobSpan(static_cast<const u8*>(ptr), false);
+    return sp != nullptr ? sp->end : nullptr;
 }
 
 extern "C" const u8* Port_GetMapAssetDataByIndex(u32 assetIndex, u32* size) {

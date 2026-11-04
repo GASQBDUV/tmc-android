@@ -167,7 +167,7 @@ static void Port_InitAudio(void) {
 
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) && Port_Audio_Init()) {
-        fprintf(stderr, "Audio device unavailable, using SDL dummy audio driver.\n");
+        fprintf(stderr, "Audio device unavailable (%s), using SDL dummy audio driver.\n", err ? err : "unknown error");
         gMain.muteAudio = 1;
         return;
     }
